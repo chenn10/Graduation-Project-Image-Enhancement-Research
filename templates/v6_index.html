@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CycleGAN V6.0 多模型去霧服務</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Microsoft YaHei', 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 3px solid #667eea;
+        }
+        
+        .header h1 {
+            color: #333;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .header p {
+            color: #666;
+            font-size: 1.1rem;
+        }
+        
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-bottom: 30px;
+        }
+        
+        .upload-section {
+            background: #f8f9ff;
+            border-radius: 15px;
+            padding: 25px;
+            border: 2px dashed #667eea;
+            transition: all 0.3s ease;
+        }
+        
+        .upload-section:hover {
+            border-color: #764ba2;
+            background: #f0f2ff;
+        }
+        
+        .model-selection {
+            background: #fff5f5;
+            border-radius: 15px;
+            padding: 25px;
+            border: 2px solid #ff6b6b;
+        }
+        
+        .section-title {
+            font-size: 1.3rem;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #333;
+        }
+        
+        .file-input-wrapper {
+            position: relative;
+            display: inline-block;
+            cursor: pointer;
+            width: 100%;
+        }
+        
+        .file-input {
+            display: none;
+        }
+        
+        .file-input-button {
+            display: block;
+            width: 100%;
+            padding: 20px;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-align: center;
+        }
+        
+        .file-input-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .preview-container {
+            margin-top: 15px;
+            text-align: center;
+        }
+        
+        .preview-image {
+            max-width: 100%;
+            max-height: 200px;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+        
+        .model-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 10px;
+            max-height: 400px;
+            overflow-y: auto;
+            padding-right: 10px;
+        }
+        
+        .model-option {
+            display: flex;
+            align-items: center;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: white;
+        }
+        
+        .model-option:hover {
+            border-color: #667eea;
+            transform: translateX(5px);
+        }
+        
+        .model-option.selected {
+            border-color: #667eea;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white;
+        }
+        
+        .model-info {
+            margin-left: 10px;
+            flex-grow: 1;
+        }
+        
+        .model-name {
+            font-weight: bold;
+            font-size: 1rem;
+        }
+        
+        .model-desc {
+            font-size: 0.85rem;
+            opacity: 0.8;
+            margin-top: 2px;
+        }
+        
+        .process-section {
+            text-align: center;
+            margin: 30px 0;
+        }
+        
+        .process-button {
+            padding: 15px 40px;
+            background: linear-gradient(45deg, #ff6b6b, #ffa726);
+            color: white;
+            border: none;
+            border-radius: 25px;
+            font-size: 1.2rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .process-button:hover:not(:disabled) {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 25px rgba(255, 107, 107, 0.4);
+        }
+        
+        .process-button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        .loading {
+            display: none;
+            margin: 20px 0;
+        }
+        
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .result-section {
+            display: none;
+            margin-top: 30px;
+            padding: 25px;
+            background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%);
+            border-radius: 15px;
+        }
+        
+        .result-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            align-items: center;
+        }
+        
+        .result-image {
+            max-width: 100%;
+            border-radius: 10px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+        }
+        
+        .result-info {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        
+        .info-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .info-label {
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .info-value {
+            color: #666;
+        }
+        
+        .download-button {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(45deg, #4CAF50, #45a049);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 15px;
+            transition: all 0.3s ease;
+        }
+        
+        .download-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 15px rgba(76, 175, 80, 0.4);
+        }
+        
+        .error-message {
+            display: none;
+            padding: 15px;
+            background: #ffebee;
+            border: 2px solid #f44336;
+            border-radius: 8px;
+            color: #d32f2f;
+            margin-top: 15px;
+        }
+        
+        .success-message {
+            display: none;
+            padding: 15px;
+            background: #e8f5e8;
+            border: 2px solid #4CAF50;
+            border-radius: 8px;
+            color: #2e7d32;
+            margin-top: 15px;
+        }
+        
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+            
+            .result-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .container {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌟 CycleGAN V6.0 多模型去霧服務</h1>
+            <p>選擇最適合的 V6 模型進行圖像去霧處理 - 支援大圖重疊推論</p>
+        </div>
+        
+        <div class="main-content">
+            <div class="upload-section">
+                <h3 class="section-title">📸 上傳有霧圖像</h3>
+                <div class="file-input-wrapper">
+                    <input type="file" id="imageFile" class="file-input" accept="image/*">
+                    <label for="imageFile" class="file-input-button">
+                        📁 選擇圖像文件 (支持 JPG, PNG)
+                    </label>
+                </div>
+                <div class="preview-container">
+                    <img id="imagePreview" class="preview-image" style="display: none;">
+                </div>
+            </div>
+            
+            <div class="model-selection">
+                <h3 class="section-title">🤖 選擇 V6 模型</h3>
+                <div class="model-grid">
+                    {% for key, model in models.items() %}
+                    <div class="model-option" data-model="{{ key }}">
+                        <input type="radio" name="model" value="{{ key }}" {% if key == 'v6_epoch_200' %}checked{% endif %}>
+                        <div class="model-info">
+                            <div class="model-name">{{ model.name }}</div>
+                            <div class="model-desc">{{ model.description }}</div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        
+        <div class="process-section">
+            <button id="processButton" class="process-button" disabled>
+                🚀 開始去霧處理
+            </button>
+            
+            <div id="loading" class="loading">
+                <div class="spinner"></div>
+                <p>正在使用 V6 模型處理圖像，請稍候...</p>
+            </div>
+        </div>
+        
+        <div id="errorMessage" class="error-message"></div>
+        <div id="successMessage" class="success-message"></div>
+        
+        <div id="resultSection" class="result-section">
+            <h3 class="section-title">✨ 去霧結果</h3>
+            <div class="result-grid">
+                <div>
+                    <h4>處理後圖像</h4>
+                    <img id="resultImage" class="result-image">
+                </div>
+                <div class="result-info">
+                    <div class="info-item">
+                        <span class="info-label">使用模型:</span>
+                        <span class="info-value" id="usedModel">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">處理時間:</span>
+                        <span class="info-value" id="processingTime">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">圖像尺寸:</span>
+                        <span class="info-value" id="imageSize">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">GPU 加速:</span>
+                        <span class="info-value">✅ 已啟用</span>
+                    </div>
+                    <button id="downloadButton" class="download-button">
+                        💾 下載去霧圖像
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let selectedFile = null;
+        let selectedModel = 'v6_epoch_200';
+        let resultFilename = null;
+        
+        // 文件選擇處理
+        document.getElementById('imageFile').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                selectedFile = file;
+                
+                // 顯示預覽
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const preview = document.getElementById('imagePreview');
+                    preview.src = e.target.result;
+                    preview.style.display = 'block';
+                };
+                reader.readAsDataURL(file);
+                
+                // 啟用處理按鈕
+                document.getElementById('processButton').disabled = false;
+            }
+        });
+        
+        // 模型選擇處理
+        document.querySelectorAll('.model-option').forEach(option => {
+            option.addEventListener('click', function() {
+                // 移除其他選中狀態
+                document.querySelectorAll('.model-option').forEach(opt => {
+                    opt.classList.remove('selected');
+                    opt.querySelector('input').checked = false;
+                });
+                
+                // 設置當前選中
+                this.classList.add('selected');
+                this.querySelector('input').checked = true;
+                selectedModel = this.dataset.model;
+            });
+        });
+        
+        // 初始化選中狀態
+        document.querySelector('.model-option[data-model="v6_epoch_200"]').classList.add('selected');
+        
+        // 處理按鈕
+        document.getElementById('processButton').addEventListener('click', async function() {
+            if (!selectedFile) {
+                showError('請先選擇一張圖像');
+                return;
+            }
+            
+            // 顯示加載狀態
+            showLoading(true);
+            hideMessages();
+            
+            // 準備表單數據
+            const formData = new FormData();
+            formData.append('image', selectedFile);
+            formData.append('model', selectedModel);
+            
+            try {
+                const response = await fetch('/process', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    // 顯示結果
+                    document.getElementById('resultImage').src = result.result_image;
+                    document.getElementById('usedModel').textContent = result.model_name;
+                    document.getElementById('processingTime').textContent = result.processing_time;
+                    document.getElementById('imageSize').textContent = result.image_size;
+                    
+                    document.getElementById('resultSection').style.display = 'block';
+                    showSuccess('圖像去霧處理完成！');
+                    
+                } else {
+                    showError(result.error || '處理失敗');
+                }
+            } catch (error) {
+                showError('網絡錯誤: ' + error.message);
+            } finally {
+                showLoading(false);
+            }
+        });
+        
+        // 下載按鈕
+        document.getElementById('downloadButton').addEventListener('click', function() {
+            if (resultFilename) {
+                window.open(`/download/${resultFilename}`, '_blank');
+            } else {
+                // 如果沒有文件名，直接下載base64圖像
+                const link = document.createElement('a');
+                link.download = `defogged_v6_${selectedModel}_${Date.now()}.jpg`;
+                link.href = document.getElementById('resultImage').src;
+                link.click();
+            }
+        });
+        
+        // 工具函數
+        function showLoading(show) {
+            document.getElementById('loading').style.display = show ? 'block' : 'none';
+            document.getElementById('processButton').disabled = show;
+        }
+        
+        function showError(message) {
+            const errorDiv = document.getElementById('errorMessage');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+        
+        function showSuccess(message) {
+            const successDiv = document.getElementById('successMessage');
+            successDiv.textContent = message;
+            successDiv.style.display = 'block';
+        }
+        
+        function hideMessages() {
+            document.getElementById('errorMessage').style.display = 'none';
+            document.getElementById('successMessage').style.display = 'none';
+        }
+    </script>
+</body>
+</html>

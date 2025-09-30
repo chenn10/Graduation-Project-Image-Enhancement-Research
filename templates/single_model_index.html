@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CycleGAN 圖像去霧系統</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Microsoft YaHei', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            color: #333;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 1.1rem;
+        }
+
+        .upload-section {
+            background: #f8f9fa;
+            border: 2px dashed #ddd;
+            border-radius: 15px;
+            padding: 40px 20px;
+            text-align: center;
+            margin-bottom: 30px;
+            transition: all 0.3s ease;
+        }
+
+        .upload-section:hover {
+            border-color: #667eea;
+            background: #f0f4ff;
+        }
+
+        .upload-section.dragover {
+            border-color: #667eea;
+            background: #f0f4ff;
+            transform: scale(1.02);
+        }
+
+        .upload-icon {
+            font-size: 3rem;
+            color: #667eea;
+            margin-bottom: 20px;
+        }
+
+        .upload-text {
+            font-size: 1.2rem;
+            color: #333;
+            margin-bottom: 15px;
+        }
+
+        .upload-hint {
+            color: #666;
+            font-size: 0.9rem;
+            margin-bottom: 20px;
+        }
+
+        .file-input-wrapper {
+            position: relative;
+            display: inline-block;
+        }
+
+        .file-input {
+            opacity: 0;
+            position: absolute;
+            z-index: -1;
+        }
+
+        .file-input-label {
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white;
+            padding: 12px 30px;
+            border-radius: 25px;
+            cursor: pointer;
+            display: inline-block;
+            transition: all 0.3s ease;
+            font-weight: bold;
+        }
+
+        .file-input-label:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .process-btn {
+            background: linear-gradient(45deg, #ff6b6b, #ee5a24);
+            color: white;
+            border: none;
+            padding: 15px 40px;
+            border-radius: 25px;
+            font-size: 1.1rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-top: 20px;
+            display: none;
+        }
+
+        .process-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(255, 107, 107, 0.4);
+        }
+
+        .process-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .loading-section {
+            display: none;
+            text-align: center;
+            margin: 30px 0;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .loading-text {
+            color: #666;
+            font-size: 1.1rem;
+        }
+
+        .result-section {
+            display: none;
+            margin-top: 30px;
+        }
+
+        .result-header {
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white;
+            padding: 20px;
+            border-radius: 15px 15px 0 0;
+            text-align: center;
+        }
+
+        .result-content {
+            background: white;
+            border-radius: 0 0 15px 15px;
+            padding: 30px;
+            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.1);
+        }
+
+        .image-comparison {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-bottom: 20px;
+        }
+
+        .image-container {
+            text-align: center;
+        }
+
+        .image-label {
+            font-size: 1.1rem;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 10px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            display: inline-block;
+        }
+
+        .original-label {
+            background: #e3f2fd;
+            color: #1976d2;
+        }
+
+        .result-label {
+            background: #e8f5e8;
+            color: #388e3c;
+        }
+
+        .result-image {
+            width: 100%;
+            max-width: 400px;
+            height: auto;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+            transition: transform 0.3s ease;
+        }
+
+        .result-image:hover {
+            transform: scale(1.05);
+        }
+
+        .download-btn {
+            background: linear-gradient(45deg, #4caf50, #45a049);
+            color: white;
+            text-decoration: none;
+            padding: 12px 25px;
+            border-radius: 25px;
+            display: inline-block;
+            transition: all 0.3s ease;
+            font-weight: bold;
+            margin-top: 20px;
+        }
+
+        .download-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(76, 175, 80, 0.4);
+            text-decoration: none;
+            color: white;
+        }
+
+        .stats-info {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 20px;
+            color: #666;
+            font-size: 0.9rem;
+        }
+
+        .error-section {
+            display: none;
+            background: #ffebee;
+            border: 1px solid #f44336;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            color: #c62828;
+            text-align: center;
+        }
+
+        .preview-section {
+            display: none;
+            margin: 20px 0;
+            text-align: center;
+        }
+
+        .preview-image {
+            max-width: 300px;
+            max-height: 300px;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        @media (max-width: 768px) {
+            .image-comparison {
+                grid-template-columns: 1fr;
+                gap: 20px;
+            }
+            
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .container {
+                padding: 20px;
+                margin: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌫️ CycleGAN 圖像去霧系統</h1>
+            <p>使用深度學習技術將有霧圖像轉換為清晰圖像</p>
+        </div>
+
+        <div class="upload-section">
+            <div class="upload-icon">📸</div>
+            <div class="upload-text">上傳您的有霧圖像</div>
+            <div class="upload-hint">支持 PNG、JPG、JPEG、GIF、BMP、TIFF 格式，最大 16MB</div>
+            
+            <div class="file-input-wrapper">
+                <input type="file" id="imageInput" class="file-input" accept="image/*">
+                <label for="imageInput" class="file-input-label">📁 選擇圖像文件</label>
+            </div>
+            
+            <button id="processBtn" class="process-btn">🚀 開始去霧處理</button>
+        </div>
+
+        <div class="preview-section" id="previewSection">
+            <h3>📷 預覽上傳圖像</h3>
+            <img id="previewImage" class="preview-image" alt="預覽圖像">
+        </div>
+
+        <div class="loading-section" id="loadingSection">
+            <div class="spinner"></div>
+            <div class="loading-text">正在處理圖像，請稍候...</div>
+        </div>
+
+        <div class="error-section" id="errorSection">
+            <strong>❌ 處理失敗</strong><br>
+            <span id="errorMessage"></span>
+        </div>
+
+        <div class="result-section" id="resultSection">
+            <div class="result-header">
+                <h2>✨ 去霧結果</h2>
+                <div id="processingStats"></div>
+            </div>
+            
+            <div class="result-content">
+                <div class="image-comparison">
+                    <div class="image-container">
+                        <div class="image-label original-label">🌫️ 原始有霧圖像</div>
+                        <img id="originalImage" class="result-image" alt="原始圖像">
+                    </div>
+                    
+                    <div class="image-container">
+                        <div class="image-label result-label">✨ 去霧結果</div>
+                        <img id="resultImage" class="result-image" alt="去霧結果">
+                    </div>
+                </div>
+                
+                <div style="text-align: center;">
+                    <a id="downloadBtn" class="download-btn" href="#" download>💾 下載去霧結果</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const imageInput = document.getElementById('imageInput');
+        const processBtn = document.getElementById('processBtn');
+        const previewSection = document.getElementById('previewSection');
+        const previewImage = document.getElementById('previewImage');
+        const loadingSection = document.getElementById('loadingSection');
+        const resultSection = document.getElementById('resultSection');
+        const errorSection = document.getElementById('errorSection');
+        const processingStats = document.getElementById('processingStats');
+        const originalImage = document.getElementById('originalImage');
+        const resultImage = document.getElementById('resultImage');
+        const downloadBtn = document.getElementById('downloadBtn');
+
+        // 圖像選擇處理
+        imageInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    previewImage.src = e.target.result;
+                    previewSection.style.display = 'block';
+                    processBtn.style.display = 'inline-block';
+                };
+                reader.readAsDataURL(file);
+                
+                // 隱藏之前的結果
+                resultSection.style.display = 'none';
+                errorSection.style.display = 'none';
+            }
+        });
+
+        // 處理按鈕點擊
+        processBtn.addEventListener('click', async function() {
+            const file = imageInput.files[0];
+            if (!file) return;
+
+            // 隱藏之前的結果和錯誤
+            resultSection.style.display = 'none';
+            errorSection.style.display = 'none';
+            loadingSection.style.display = 'block';
+            processBtn.disabled = true;
+
+            const formData = new FormData();
+            formData.append('image', file);
+
+            try {
+                const response = await fetch('/process', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(result.error || '處理失敗');
+                }
+
+                displayResult(result);
+                
+            } catch (error) {
+                showError(error.message);
+            } finally {
+                loadingSection.style.display = 'none';
+                processBtn.disabled = false;
+            }
+        });
+
+        function displayResult(data) {
+            // 顯示統計資訊
+            processingStats.innerHTML = `
+                <p><strong>✅ 處理完成!</strong></p>
+                <p><strong>原始檔案:</strong> ${data.original_filename}</p>
+                <p><strong>圖像尺寸:</strong> ${data.image_size}</p>
+            `;
+
+            // 顯示圖像
+            originalImage.src = previewImage.src;
+            resultImage.src = data.result_image;
+            downloadBtn.href = `/download/${data.result_filename}`;
+
+            resultSection.style.display = 'block';
+        }
+
+        function showError(message) {
+            document.getElementById('errorMessage').textContent = message;
+            errorSection.style.display = 'block';
+        }
+
+        // 拖拽上傳功能
+        const uploadSection = document.querySelector('.upload-section');
+        
+        uploadSection.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadSection.classList.add('dragover');
+        });
+
+        uploadSection.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            uploadSection.classList.remove('dragover');
+        });
+
+        uploadSection.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadSection.classList.remove('dragover');
+            
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                imageInput.files = files;
+                imageInput.dispatchEvent(new Event('change'));
+            }
+        });
+    </script>
+</body>
+</html>

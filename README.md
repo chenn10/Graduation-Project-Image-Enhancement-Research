@@ -19,9 +19,9 @@
 - numpy
 - matplotlib
 - tqdm
-## epoch
+##
 
-請至https://drive.google.com/file/d/1g9Mhh1odLVBflJ9MWCVGK2Q4HYO35Fi4/view?usp=drive_link 進行下載
+模型請至https://drive.google.com/file/d/1g9Mhh1odLVBflJ9MWCVGK2Q4HYO35Fi4/view?usp=drive_link 進行下載
 
 清晰圖像訓練集:https://www.kaggle.com/datasets/klemenko/kitti-dataset
 有霧圖像訓練集:https://www.kaggle.com/datasets/yessicatuteja/foggy-cityscapes-image-dataset
@@ -30,3 +30,7 @@
 
 執行時請執行以下代碼:cd /path/to/yourproject/python v6_multi_model_web.py
 便可以在瀏覽器中開啟:http://localhost:5000使用環境
+
+##
+本專題尚在持續優化中，若有更新將會上傳於此
+

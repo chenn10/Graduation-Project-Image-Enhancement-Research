@@ -21,7 +21,7 @@
 - tqdm
 ##
 
-模型請至https://drive.google.com/file/d/1g9Mhh1odLVBflJ9MWCVGK2Q4HYO35Fi4/view?usp=drive_link 進行下載
+模型請至https://drive.google.com/drive/folders/1BsrbmEJioZPdssDrPnVXkEu1II3KQxY3?usp=sharing進行下載
 
 清晰圖像訓練集:https://www.kaggle.com/datasets/klemenko/kitti-dataset
 
@@ -34,5 +34,6 @@
 
 ##
 本專題尚在持續優化中，若有更新將會上傳於此
+
 
 

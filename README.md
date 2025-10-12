@@ -24,6 +24,7 @@
 模型請至https://drive.google.com/file/d/1g9Mhh1odLVBflJ9MWCVGK2Q4HYO35Fi4/view?usp=drive_link 進行下載
 
 清晰圖像訓練集:https://www.kaggle.com/datasets/klemenko/kitti-dataset
+
 有霧圖像訓練集:https://www.kaggle.com/datasets/yessicatuteja/foggy-cityscapes-image-dataset
 
 使用者須自行建立兩個空資料夾分別是:uploads以及web_result用來儲存在網站上傳的照片 以及 進行去霧後的結果
@@ -33,4 +34,5 @@
 
 ##
 本專題尚在持續優化中，若有更新將會上傳於此
+
 

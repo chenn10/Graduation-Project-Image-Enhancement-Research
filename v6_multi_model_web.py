@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-CycleGAN v6.0 多模型圖像去霧 Web 應用
-支持下拉選單選擇不同的 v6 模型
+CycleGAN v7.0 Enhanced Web 應用
+使用三級離散霧度分級的 v7 增強版模型
 """
 
 import os
@@ -12,403 +12,765 @@ import torch.nn.functional as F
 import numpy as np
 from PIL import Image
 import torchvision.transforms as transforms
-from flask import Flask, request, jsonify, send_file, render_template
-from werkzeug.utils import secure_filename
+from flask import Flask, request, jsonify, render_template_string
 import base64
-import cv2
-from datetime import datetime
-import uuid
-import math
+import glob
 
-app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['RESULT_FOLDER'] = 'web_results'
-
-# 創建必要資料夾
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-os.makedirs(app.config['RESULT_FOLDER'], exist_ok=True)
-
-# 設備設定
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-# 可用的 v6 模型配置
-V6_MODELS = {
-    'v6_epoch_40': {
-        'name': 'CycleGAN v6.0 - 平衡版本 (Epoch 40)',
-        'path': 'checkpoints/cyclegan_v6_epoch_40.pth',
-        'description': '適合日常使用的均衡去霧效果，處理速度快，效果穩定。',
-        'badge': 'balanced'
-    },
-    'v6_epoch_120': {
-        'name': 'CycleGAN v6.0 - 高級版本 (Epoch 120)',
-        'path': 'checkpoints/cyclegan_v6_epoch_120.pth',
-        'description': '推薦使用！更強的去霧能力，細節保持更好，適合大部分場景。',
-        'badge': 'premium'
-    },
-    'v6_epoch_200': {
-        'name': 'CycleGAN v6.0 - 完整版本 (Epoch 200)',
-        'path': 'checkpoints/cyclegan_v6_epoch_200.pth',
-        'description': '最強去霧效果，最佳細節還原，適合專業用途和高品質需求。',
-        'badge': 'ultimate'
-    }
-}
-
+# 解決 spectral norm 問題
 def spectral_norm(module, name='weight', power_iterations=1):
-    """使用 PyTorch 內建的 spectral normalization"""
     try:
         return torch.nn.utils.spectral_norm(module, name=name, n_power_iterations=power_iterations)
     except:
         return module
 
 class SelfAttention(nn.Module):
-    """修正的自注意力機制"""
-    def __init__(self, in_channels):
+    """自注意力機制 - v7 版本"""
+    def __init__(self, in_dim, activation=F.relu, with_attn=False):
         super(SelfAttention, self).__init__()
-        self.in_channels = in_channels
+        self.chanel_in = in_dim
+        self.activation = activation
+        self.with_attn = with_attn
         
-        # 使用 spectral norm
-        self.query_conv = spectral_norm(nn.Conv2d(in_channels, in_channels // 8, 1))
-        self.key_conv = spectral_norm(nn.Conv2d(in_channels, in_channels // 8, 1))
-        self.value_conv = spectral_norm(nn.Conv2d(in_channels, in_channels, 1))
-        
-        self.gamma = nn.Parameter(torch.zeros(1))
-        self.softmax = nn.Softmax(dim=-1)
-        
+        if self.with_attn:
+            self.query_conv = nn.Conv2d(in_channels=in_dim, out_channels=in_dim//8, kernel_size=1)
+            self.key_conv = nn.Conv2d(in_channels=in_dim, out_channels=in_dim//8, kernel_size=1)
+            self.value_conv = nn.Conv2d(in_channels=in_dim, out_channels=in_dim, kernel_size=1)
+            self.gamma = nn.Parameter(torch.zeros(1))
+    
     def forward(self, x):
-        batch_size, C, H, W = x.size()
+        if not self.with_attn:
+            return x
+            
+        batch_size, C, height, width = x.size()
+        proj_query = self.query_conv(x).view(batch_size, -1, width*height).permute(0, 2, 1)
+        proj_key = self.key_conv(x).view(batch_size, -1, width*height)
         
-        # Query, Key, Value
-        proj_query = self.query_conv(x).view(batch_size, -1, H * W).permute(0, 2, 1)  # B x N x C'
-        proj_key = self.key_conv(x).view(batch_size, -1, H * W)  # B x C' x N
-        proj_value = self.value_conv(x).view(batch_size, -1, H * W)  # B x C x N
+        energy = torch.bmm(proj_query, proj_key)
+        attention = F.softmax(energy, dim=-1)
         
-        # 注意力權重
-        attention = torch.bmm(proj_query, proj_key)  # B x N x N
-        attention = self.softmax(attention)
+        proj_value = self.value_conv(x).view(batch_size, -1, width*height)
+        out = torch.bmm(proj_value, attention.permute(0, 2, 1))
+        out = out.view(batch_size, C, height, width)
         
-        # 應用注意力
-        out = torch.bmm(proj_value, attention.permute(0, 2, 1))  # B x C x N
-        out = out.view(batch_size, C, H, W)  # 修正：正確的 view 操作
-        
-        # 殘差連接
         out = self.gamma * out + x
         return out
 
 class ImprovedUpsample(nn.Module):
-    """改進的上採樣塊：Upsample + Conv2d + IN + ReLU"""
-    def __init__(self, in_channels, out_channels):
+    """改進的上採樣模組 - v7 版本"""
+    def __init__(self, in_channels, out_channels, kernel_size=3):
         super(ImprovedUpsample, self).__init__()
         self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
-        self.conv = nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        self.norm = nn.InstanceNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, padding=kernel_size//2)
+        self.activation = nn.ReLU(inplace=True)
         
     def forward(self, x):
         x = self.upsample(x)
         x = self.conv(x)
-        x = self.norm(x)
-        x = self.relu(x)
+        x = self.activation(x)
         return x
 
 class ResidualBlock(nn.Module):
-    """殘差塊 - 使用反射padding"""
-    def __init__(self, channels):
+    """殘差塊 - v7 版本"""
+    def __init__(self, channels, use_dropout=False):
         super(ResidualBlock, self).__init__()
-        self.pad1 = nn.ReflectionPad2d(1)
-        self.conv1 = nn.Conv2d(channels, channels, 3, padding=0)
-        self.norm1 = nn.InstanceNorm2d(channels)
-        self.pad2 = nn.ReflectionPad2d(1)
-        self.conv2 = nn.Conv2d(channels, channels, 3, padding=0)
-        self.norm2 = nn.InstanceNorm2d(channels)
-        self.relu = nn.ReLU(inplace=True)
-        
-    def forward(self, x):
-        residual = x
-        out = self.pad1(x)
-        out = self.conv1(out)
-        out = self.norm1(out)
-        out = self.relu(out)
-        
-        out = self.pad2(out)
-        out = self.conv2(out)
-        out = self.norm2(out)
-        return out + residual
+        self.conv_block = nn.Sequential(
+            nn.ReflectionPad2d(1),
+            spectral_norm(nn.Conv2d(channels, channels, 3)),
+            nn.InstanceNorm2d(channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5) if use_dropout else nn.Identity(),
+            nn.ReflectionPad2d(1),
+            spectral_norm(nn.Conv2d(channels, channels, 3)),
+            nn.InstanceNorm2d(channels)
+        )
 
-class V6Generator(nn.Module):
-    """v6 生成器 - 修正上採樣和注意力機制"""
-    def __init__(self, input_channels=3, output_channels=3, n_residual_blocks=9):
-        super(V6Generator, self).__init__()
+    def forward(self, x):
+        return x + self.conv_block(x)
+
+class V7Generator(nn.Module):
+    """CycleGAN v7 Enhanced 生成器"""
+    def __init__(self, input_channels=3, output_channels=3, n_residual_blocks=9, use_self_attention=False):
+        super(V7Generator, self).__init__()
         
-        # 編碼器 - 使用反射padding
+        # 編碼器
         self.encoder = nn.Sequential(
             nn.ReflectionPad2d(3),
-            nn.Conv2d(input_channels, 64, 7, padding=0),
+            spectral_norm(nn.Conv2d(input_channels, 64, 7)),
             nn.InstanceNorm2d(64),
             nn.ReLU(inplace=True),
             
-            nn.Conv2d(64, 128, 3, stride=2, padding=1),
+            spectral_norm(nn.Conv2d(64, 128, 3, stride=2, padding=1)),
             nn.InstanceNorm2d(128),
             nn.ReLU(inplace=True),
             
-            nn.Conv2d(128, 256, 3, stride=2, padding=1),
+            spectral_norm(nn.Conv2d(128, 256, 3, stride=2, padding=1)),
             nn.InstanceNorm2d(256),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=True)
         )
         
         # 殘差塊
-        residual_layers = []
+        residual_blocks = []
         for _ in range(n_residual_blocks):
-            residual_layers.append(ResidualBlock(256))
-        self.residual_blocks = nn.Sequential(*residual_layers)
+            residual_blocks.append(ResidualBlock(256))
+        self.residual_blocks = nn.Sequential(*residual_blocks)
         
-        # 自注意力（在中間特徵圖上）
-        self.attention = SelfAttention(256)
+        # 自注意力（可選）
+        self.use_self_attention = use_self_attention
+        if use_self_attention:
+            self.self_attention = SelfAttention(256, with_attn=True)
+        else:
+            self.self_attention = SelfAttention(256, with_attn=False)
         
-        # 解碼器 - 兩段上採樣（修正尺寸問題）+ 反射padding
+        # 解碼器 - 使用改進的上採樣
         self.decoder = nn.Sequential(
-            ImprovedUpsample(256, 128),  # 第一段上採樣 64x64 -> 128x128
-            ImprovedUpsample(128, 64),   # 第二段上採樣 128x128 -> 256x256
+            ImprovedUpsample(256, 128),
+            nn.InstanceNorm2d(128),
+            
+            ImprovedUpsample(128, 64),
+            nn.InstanceNorm2d(64),
             
             nn.ReflectionPad2d(3),
-            nn.Conv2d(64, output_channels, 7, padding=0),
+            nn.Conv2d(64, output_channels, 7),
             nn.Tanh()
         )
-        
+
     def forward(self, x):
-        x = self.encoder(x)
-        x = self.residual_blocks(x)
-        x = self.attention(x)
-        x = self.decoder(x)
-        return x
-
-# 全域變數存儲模型
-loaded_models = {}
-
-def load_model(model_key):
-    """動態載入指定的模型"""
-    if model_key in loaded_models:
-        return loaded_models[model_key]
-    
-    if model_key not in V6_MODELS:
-        raise ValueError(f"未知的模型: {model_key}")
-    
-    model_info = V6_MODELS[model_key]
-    model_path = model_info['path']
-    
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"模型文件不存在: {model_path}")
-    
-    print(f"🔄 載入模型: {model_info['name']}")
-    
-    # 創建模型
-    model = V6Generator()
-    
-    # 載入權重
-    try:
-        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-        
-        if 'G_A2B_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['G_A2B_state_dict'])
-        elif 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            model.load_state_dict(checkpoint)
-        
-        model.to(device)
-        model.eval()
-        
-        # 緩存模型
-        loaded_models[model_key] = model
-        
-        print(f"✅ 成功載入: {model_info['name']}")
-        return model
-        
-    except Exception as e:
-        print(f"❌ 載入失敗: {str(e)}")
-        raise
-
-class OverlapInference:
-    """重疊推理處理大圖像"""
-    def __init__(self, tile_size=256, overlap=32):
-        self.tile_size = tile_size
-        self.overlap = overlap
-        self.stride = tile_size - overlap
-        
-    def process_large_image(self, model, image_tensor):
-        """處理大圖像"""
-        B, C, H, W = image_tensor.shape
-        
-        if H <= self.tile_size and W <= self.tile_size:
-            return model(image_tensor)
-        
-        # 計算需要的 tiles
-        h_tiles = math.ceil(H / self.stride)
-        w_tiles = math.ceil(W / self.stride)
-        
-        # 輸出圖像
-        output = torch.zeros_like(image_tensor)
-        weight_map = torch.zeros((H, W), device=image_tensor.device)
-        
-        for i in range(h_tiles):
-            for j in range(w_tiles):
-                # 計算tile位置
-                h_start = i * self.stride
-                w_start = j * self.stride
-                h_end = min(h_start + self.tile_size, H)
-                w_end = min(w_start + self.tile_size, W)
-                
-                # 調整tile大小確保不超出邊界
-                actual_h = h_end - h_start
-                actual_w = w_end - w_start
-                
-                # 提取tile
-                tile = image_tensor[:, :, h_start:h_end, w_start:w_end]
-                
-                # 如果tile太小，需要padding
-                if actual_h < self.tile_size or actual_w < self.tile_size:
-                    padded_tile = torch.zeros((B, C, self.tile_size, self.tile_size), 
-                                            device=image_tensor.device)
-                    padded_tile[:, :, :actual_h, :actual_w] = tile
-                    tile_output = model(padded_tile)
-                    tile_output = tile_output[:, :, :actual_h, :actual_w]
-                else:
-                    tile_output = model(tile)
-                
-                # 創建權重mask（中心權重更高）
-                tile_weight = torch.ones((actual_h, actual_w), device=image_tensor.device)
-                
-                # 邊緣降權
-                if i > 0:  # 不是第一行
-                    fade_h = min(self.overlap, actual_h)
-                    for k in range(fade_h):
-                        weight = k / fade_h
-                        tile_weight[k, :] *= weight
-                        
-                if j > 0:  # 不是第一列
-                    fade_w = min(self.overlap, actual_w)
-                    for k in range(fade_w):
-                        weight = k / fade_w
-                        tile_weight[:, k] *= weight
-                
-                # 累加到輸出
-                output[:, :, h_start:h_end, w_start:w_end] += tile_output * tile_weight[None, None, :, :]
-                weight_map[h_start:h_end, w_start:w_end] += tile_weight
-        
-        # 歸一化
-        weight_map = torch.clamp(weight_map, min=1e-8)
-        output = output / weight_map[None, None, :, :]
-        
+        encoded = self.encoder(x)
+        residual = self.residual_blocks(encoded)
+        attended = self.self_attention(residual)
+        output = self.decoder(attended)
         return output
 
-def preprocess_image(image_pil):
-    """預處理圖像"""
-    # 轉換為RGB
-    if image_pil.mode != 'RGB':
-        image_pil = image_pil.convert('RGB')
-    
-    # 轉換為tensor
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    ])
-    
-    image_tensor = transform(image_pil).unsqueeze(0).to(device)
-    return image_tensor
+# 全域變數
+app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
 
-def postprocess_image(image_tensor):
-    """後處理圖像"""
-    # 反歸一化
-    image_tensor = (image_tensor + 1) / 2.0
-    image_tensor = torch.clamp(image_tensor, 0, 1)
-    
-    # 轉換為PIL
-    image_np = image_tensor.squeeze(0).cpu().detach().numpy()
-    image_np = np.transpose(image_np, (1, 2, 0))
-    image_np = (image_np * 255).astype(np.uint8)
-    
-    return Image.fromarray(image_np)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+generator = None
+current_model_path = None
 
-def process_image_with_model(image_pil, model_key):
-    """使用指定模型處理圖像"""
-    model = load_model(model_key)
+def get_all_v7_models():
+    """獲取所有可用的 v7 模型"""
+    v7_models = glob.glob('checkpoints/cyclegan_v7_enhanced_no_attn_epoch_*.pth')
+    if not v7_models:
+        v7_models = glob.glob('checkpoints/cyclegan_v7_enhanced_epoch_*.pth')
     
-    # 預處理
-    input_tensor = preprocess_image(image_pil)
+    if not v7_models:
+        return []
     
-    # 推理
-    with torch.no_grad():
-        if input_tensor.shape[2] > 512 or input_tensor.shape[3] > 512:
-            # 大圖像使用重疊推理
-            overlap_inference = OverlapInference(tile_size=256, overlap=32)
-            output_tensor = overlap_inference.process_large_image(model, input_tensor)
+    # 按 epoch 數字排序
+    v7_models.sort(key=lambda x: int(x.split('_epoch_')[1].split('.')[0]))
+    return v7_models
+
+def find_latest_v7_model():
+    """尋找最新的 v7 模型"""
+    v7_models = get_all_v7_models()
+    
+    if not v7_models:
+        print("❌ 找不到任何 v7 模型檔案")
+        return None
+    
+    latest_model = v7_models[-1]
+    print(f"🔍 找到 v7 模型: {latest_model}")
+    return latest_model
+
+def load_v7_model(model_path=None):
+    """載入 v7 模型"""
+    global generator, current_model_path
+    
+    try:
+        print("🔄 載入 CycleGAN v7 Enhanced 模型...")
+        
+        # 如果沒指定模型，使用最新的
+        if model_path is None:
+            model_path = find_latest_v7_model()
+        
+        if model_path is None:
+            return False, "找不到任何 v7 模型檔案"
+        
+        # 初始化生成器
+        generator = V7Generator(use_self_attention=False).to(device)
+        
+        # 載入權重
+        checkpoint = torch.load(model_path, map_location=device)
+        
+        # 載入 generator_AB (有霧→清晰)
+        if 'generator_AB' in checkpoint:
+            generator.load_state_dict(checkpoint['generator_AB'])
+            current_model_path = model_path
+            print(f"✅ 成功載入 v7 模型: {model_path}")
         else:
-            # 小圖像直接處理
-            output_tensor = model(input_tensor)
+            print("❌ 模型檔案中沒有 generator_AB")
+            return False, "模型檔案中沒有 generator_AB"
+        
+        generator.eval()
+        return True, model_path
+        
+    except Exception as e:
+        print(f"❌ v7 模型載入失敗: {e}")
+        return False, str(e)
+
+def process_image_v7(image_pil):
+    """使用 v7 模型處理圖像"""
+    global generator
     
-    # 後處理
-    result_image = postprocess_image(output_tensor)
-    return result_image
+    try:
+        # 保持比例的圖像轉換
+        original_size = image_pil.size
+        
+        # 計算適當的處理尺寸（適配模型）
+        def get_processing_size(w, h, target_size=512):
+            scale = target_size / max(w, h)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            
+            # 確保能被32整除
+            new_w = (new_w // 32) * 32
+            new_h = (new_h // 32) * 32
+            
+            # 最小尺寸保證
+            new_w = max(new_w, 256)
+            new_h = max(new_h, 256)
+            
+            return new_w, new_h
+        
+        proc_w, proc_h = get_processing_size(original_size[0], original_size[1])
+        
+        # 圖像轉換
+        transform = transforms.Compose([
+            transforms.Resize((proc_h, proc_w)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
+        
+        # 處理圖像
+        input_tensor = transform(image_pil).unsqueeze(0).to(device)
+        
+        with torch.no_grad():
+            output_tensor = generator(input_tensor)
+        
+        # 轉換回 PIL
+        output_numpy = output_tensor.squeeze().cpu().numpy()
+        output_numpy = (output_numpy + 1.0) / 2.0
+        output_numpy = np.transpose(output_numpy, (1, 2, 0))
+        output_numpy = np.clip(output_numpy * 255, 0, 255).astype(np.uint8)
+        
+        result_image = Image.fromarray(output_numpy)
+        
+        # 調整回原始尺寸
+        if result_image.size != original_size:
+            result_image = result_image.resize(original_size, Image.Resampling.LANCZOS)
+        
+        return result_image
+        
+    except Exception as e:
+        print(f"❌ v7 圖像處理失敗: {e}")
+        return None
 
 @app.route('/')
 def index():
-    """主頁"""
-    return render_template('v6_optimized_index.html', models=V6_MODELS)
+    return render_template_string('''
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CycleGAN v7.0 Enhanced 去霧系統</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            max-width: 1200px; 
+            margin: 0 auto; 
+            padding: 20px; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+        }
+        .container { background: white; border-radius: 15px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); }
+        .header { text-align: center; margin-bottom: 30px; }
+        .header h1 { color: #4a5568; margin: 0; font-size: 2.5em; }
+        .header p { color: #718096; font-size: 1.1em; margin: 10px 0; }
+        
+        .upload-section { 
+            background: #f7fafc; 
+            padding: 30px; 
+            border-radius: 10px; 
+            margin-bottom: 20px; 
+            border: 2px dashed #cbd5e0;
+            transition: all 0.3s ease;
+        }
+        .upload-section:hover { border-color: #4299e1; background: #ebf8ff; }
+        
+        .upload-area { 
+            text-align: center; 
+            cursor: pointer; 
+            padding: 40px;
+            border-radius: 8px;
+        }
+        
+        .btn { 
+            background: linear-gradient(135deg, #4299e1, #3182ce); 
+            color: white; 
+            padding: 12px 24px; 
+            border: none; 
+            border-radius: 25px; 
+            cursor: pointer; 
+            font-size: 16px; 
+            margin: 5px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(66, 153, 225, 0.3);
+        }
+        .btn:hover { 
+            background: linear-gradient(135deg, #3182ce, #2c5282); 
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(66, 153, 225, 0.4);
+        }
+        .btn:disabled { 
+            background: #a0aec0; 
+            cursor: not-allowed; 
+            transform: none;
+            box-shadow: none;
+        }
+        
+        .results { 
+            background: white; 
+            padding: 30px; 
+            border-radius: 10px; 
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1); 
+            display: none; 
+            margin-top: 20px;
+        }
+        
+        .image-comparison { 
+            display: grid; 
+            grid-template-columns: 1fr 1fr; 
+            gap: 20px; 
+            margin-top: 20px; 
+        }
+        
+        .image-container { 
+            text-align: center; 
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+        }
+        .image-container h4 { 
+            margin-top: 0; 
+            color: #2d3748;
+            font-size: 1.2em;
+        }
+        .image-container img { 
+            max-width: 100%; 
+            border-radius: 8px; 
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            transition: transform 0.3s ease;
+        }
+        .image-container img:hover { transform: scale(1.05); }
+        
+        .loading { 
+            text-align: center; 
+            padding: 40px; 
+            display: none; 
+            background: white;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+        
+        .spinner { 
+            border: 4px solid #f3f3f3; 
+            border-top: 4px solid #4299e1; 
+            border-radius: 50%; 
+            width: 50px; 
+            height: 50px; 
+            animation: spin 1s linear infinite; 
+            margin: 0 auto 20px; 
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        
+        .status { 
+            padding: 15px; 
+            margin: 15px 0; 
+            border-radius: 8px; 
+            text-align: center; 
+            font-weight: bold;
+        }
+        .status.success { 
+            background: #c6f6d5; 
+            color: #22543d; 
+            border: 1px solid #9ae6b4; 
+        }
+        .status.error { 
+            background: #fed7d7; 
+            color: #742a2a; 
+            border: 1px solid #fc8181; 
+        }
+        
+        .model-info {
+            background: #edf2f7;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        
+        .model-info h3 {
+            color: #2d3748;
+            margin: 0 0 10px 0;
+        }
+        
+        .feature-list {
+            color: #4a5568;
+            font-size: 0.9em;
+            line-height: 1.6;
+        }
+        
+        .model-selector {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        
+        .model-selector select {
+            padding: 10px 15px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            background: white;
+            font-size: 14px;
+            color: #2d3748;
+            min-width: 200px;
+            margin-right: 10px;
+        }
+        
+        .model-selector select:focus {
+            outline: none;
+            border-color: #4299e1;
+        }
+        
+        .btn-switch {
+            background: linear-gradient(135deg, #38b2ac, #319795);
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-left: 10px;
+            transition: all 0.3s ease;
+        }
+        
+        .btn-switch:hover {
+            background: linear-gradient(135deg, #319795, #2c7a7b);
+            transform: translateY(-1px);
+        }
+        
+        @media (max-width: 768px) { 
+            .image-comparison { grid-template-columns: 1fr; }
+            .container { padding: 20px; }
+            .header h1 { font-size: 2em; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌟 CycleGAN v7.0 Enhanced</h1>
+            <p>三級離散霧度分級 • 智能去霧系統</p>
+        </div>
+        
+        <div class="model-selector">
+            <h3>🔧 模型選擇</h3>
+            <select id="modelSelect">
+                <option value="">載入可用模型...</option>
+            </select>
+            <button class="btn-switch" onclick="switchModel()">切換模型</button>
+            <p id="currentModel" style="margin-top: 10px; font-size: 0.9em; color: #666;">
+                當前模型: 載入中...
+            </p>
+        </div>
+        
+        <div class="model-info">
+            <h3>🚀 v7 增強版特色</h3>
+            <div class="feature-list">
+                ✨ 連續權重模式 (平滑霧度調整)<br>
+                � 強霧 Gamma 校正 (1.1~1.3)<br>
+                💡 生成器亮度優化 (防偏暗)<br>
+                🛡️ 邊緣紋理補償機制<br>
+                🔧 改進的上採樣避免棋盤效應<br>
+                📊 多尺度訓練數據集
+            </div>
+        </div>
+        
+        <div class="upload-section">
+            <h3>📁 上傳有霧圖像</h3>
+            <div class="upload-area" onclick="document.getElementById('fileInput').click()">
+                <p style="font-size: 1.2em; margin: 0;">📷 點擊此處選擇圖像文件</p>
+                <p style="color: #666; font-size: 14px; margin: 10px 0 0 0;">支持 JPG, PNG 等格式，最大 16MB</p>
+            </div>
+            <input type="file" id="fileInput" accept="image/*" style="display: none;">
+            <br><br>
+            <button class="btn" id="processBtn" onclick="processImage()" disabled>🚀 開始 v7 去霧處理</button>
+        </div>
+        
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p id="loadingText">正在使用 v7 Enhanced 模型處理圖像...</p>
+        </div>
+        
+        <div class="results" id="results">
+            <h3>📊 v7 Enhanced 去霧結果</h3>
+            <div class="image-comparison">
+                <div class="image-container">
+                    <h4>🌫️ 原始有霧圖像</h4>
+                    <img id="originalImg" alt="原始圖像">
+                </div>
+                <div class="image-container">
+                    <h4>✨ v7 去霧結果</h4>
+                    <img id="resultImg" alt="v7 去霧結果">
+                </div>
+            </div>
+        </div>
+        
+        <div id="status" class="status" style="display: none;"></div>
+    </div>
 
-@app.route('/process', methods=['POST'])
-def process():
-    """處理圖像請求"""
+    <script>
+        let selectedFile = null;
+        
+        // 頁面載入時獲取可用模型
+        document.addEventListener('DOMContentLoaded', function() {
+            loadAvailableModels();
+        });
+        
+        function loadAvailableModels() {
+            fetch('/get_models')
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    const select = document.getElementById('modelSelect');
+                    select.innerHTML = '';
+                    
+                    data.models.forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = model.path;
+                        option.textContent = model.name;
+                        if (model.is_current) {
+                            option.selected = true;
+                        }
+                        select.appendChild(option);
+                    });
+                    
+                    // 更新當前模型顯示
+                    if (data.current_model) {
+                        const currentEpoch = data.current_model.split('_epoch_')[1].split('.')[0];
+                        document.getElementById('currentModel').textContent = 
+                            `當前模型: v7 Enhanced Epoch ${currentEpoch}`;
+                    }
+                } else {
+                    showStatus('載入模型列表失敗', 'error');
+                }
+            })
+            .catch(error => {
+                showStatus('載入模型列表時發生錯誤', 'error');
+                console.error('Error:', error);
+            });
+        }
+        
+        function switchModel() {
+            const select = document.getElementById('modelSelect');
+            const selectedModel = select.value;
+            
+            if (!selectedModel) {
+                showStatus('請選擇一個模型', 'error');
+                return;
+            }
+            
+            showStatus('正在切換模型...', 'success');
+            
+            fetch('/switch_model', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    model_path: selectedModel
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    const currentEpoch = data.current_model.split('_epoch_')[1].split('.')[0];
+                    document.getElementById('currentModel').textContent = 
+                        `當前模型: v7 Enhanced Epoch ${currentEpoch}`;
+                    showStatus('模型切換成功！', 'success');
+                } else {
+                    showStatus(`模型切換失敗: ${data.error}`, 'error');
+                }
+            })
+            .catch(error => {
+                showStatus('切換模型時發生錯誤', 'error');
+                console.error('Error:', error);
+            });
+        }
+        
+        document.getElementById('fileInput').addEventListener('change', function(event) {
+            const file = event.target.files[0];
+            if (file) {
+                selectedFile = file;
+                document.getElementById('processBtn').disabled = false;
+                document.getElementById('results').style.display = 'none';
+                showStatus(`已選擇文件: ${file.name}`, 'success');
+            }
+        });
+        
+        function processImage() {
+            if (!selectedFile) {
+                showStatus('請先選擇圖像文件', 'error');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('image', selectedFile);
+            
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('processBtn').disabled = true;
+            
+            fetch('/process_v7', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('processBtn').disabled = false;
+                
+                if (data.success) {
+                    document.getElementById('originalImg').src = data.original_image;
+                    document.getElementById('resultImg').src = data.result_image;
+                    document.getElementById('results').style.display = 'block';
+                    showStatus('v7 Enhanced 去霧處理完成！', 'success');
+                } else {
+                    showStatus(`v7 處理失敗: ${data.error}`, 'error');
+                }
+            })
+            .catch(error => {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('processBtn').disabled = false;
+                showStatus('v7 處理時發生錯誤', 'error');
+                console.error('Error:', error);
+            });
+        }
+        
+        function showStatus(message, type) {
+            const status = document.getElementById('status');
+            status.className = `status ${type}`;
+            status.textContent = message;
+            status.style.display = 'block';
+            setTimeout(() => {
+                status.style.display = 'none';
+            }, 4000);
+        }
+    </script>
+</body>
+</html>
+    ''')
+
+@app.route('/get_models', methods=['GET'])
+def get_available_models():
+    """獲取所有可用的 v7 模型"""
     try:
-        # 檢查文件
-        if 'image' not in request.files:
-            return jsonify({'success': False, 'error': '未選擇圖像文件'})
+        v7_models = get_all_v7_models()
+        models_info = []
         
-        file = request.files['image']
-        if file.filename == '':
-            return jsonify({'success': False, 'error': '文件名為空'})
-        
-        # 檢查模型選擇
-        model_key = request.form.get('model', 'v6_epoch_120')
-        if model_key not in V6_MODELS:
-            return jsonify({'success': False, 'error': '無效的模型選擇'})
-        
-        # 讀取圖像
-        image_pil = Image.open(io.BytesIO(file.read()))
-        original_size = image_pil.size
-        
-        # 記錄處理時間
-        start_time = datetime.now()
-        
-        # 處理圖像
-        result_image = process_image_with_model(image_pil, model_key)
-        
-        # 調整輸出尺寸為原始尺寸
-        result_image = result_image.resize(original_size, Image.Resampling.LANCZOS)
-        
-        end_time = datetime.now()
-        processing_time = f"{(end_time - start_time).total_seconds():.2f}秒"
-        
-        # 轉換為base64
-        buffered = io.BytesIO()
-        result_image.save(buffered, format="JPEG", quality=95)
-        img_str = base64.b64encode(buffered.getvalue()).decode()
-        result_data_url = f"data:image/jpeg;base64,{img_str}"
+        for model_path in v7_models:
+            # 提取 epoch 數字
+            epoch = int(model_path.split('_epoch_')[1].split('.')[0])
+            model_name = f"v7 Enhanced Epoch {epoch}"
+            
+            models_info.append({
+                'path': model_path,
+                'name': model_name,
+                'epoch': epoch,
+                'is_current': model_path == current_model_path
+            })
         
         return jsonify({
             'success': True,
-            'result_image': result_data_url,
-            'model_name': V6_MODELS[model_key]['name'],
-            'processing_time': processing_time,
-            'image_size': f"{original_size[0]}×{original_size[1]}"
+            'models': models_info,
+            'current_model': current_model_path
         })
         
     except Exception as e:
-        print(f"處理錯誤: {str(e)}")
-        return jsonify({'success': False, 'error': f'處理失敗: {str(e)}'})
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/switch_model', methods=['POST'])
+def switch_model():
+    """切換 v7 模型"""
+    try:
+        data = request.get_json()
+        model_path = data.get('model_path')
+        
+        if not model_path:
+            return jsonify({'success': False, 'error': '請指定模型路徑'})
+        
+        success, message = load_v7_model(model_path)
+        
+        if success:
+            return jsonify({
+                'success': True,
+                'message': f'成功切換到模型: {model_path}',
+                'current_model': current_model_path
+            })
+        else:
+            return jsonify({'success': False, 'error': message})
+            
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/process_v7', methods=['POST'])
+def process_v7_image():
+    """使用 v7 模型處理上傳的圖像"""
+    try:
+        if 'image' not in request.files:
+            return jsonify({'success': False, 'error': '沒有上傳圖像'}), 400
+        
+        file = request.files['image']
+        if file.filename == '':
+            return jsonify({'success': False, 'error': '沒有選擇文件'}), 400
+        
+        print(f"🎯 使用 v7 Enhanced 處理圖像: {file.filename}")
+        
+        # 載入圖像
+        image_pil = Image.open(io.BytesIO(file.read())).convert('RGB')
+        
+        # 使用 v7 模型處理
+        result_image = process_image_v7(image_pil)
+        
+        if result_image is None:
+            return jsonify({'success': False, 'error': 'v7 圖像處理失敗'}), 500
+        
+        # 轉為base64
+        def pil_to_base64(img):
+            buffer = io.BytesIO()
+            img.save(buffer, format='PNG')
+            return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode()}"
+        
+        return jsonify({
+            'success': True,
+            'original_image': pil_to_base64(image_pil),
+            'result_image': pil_to_base64(result_image),
+            'model_version': 'v7.0 Enhanced'
+        })
+        
+    except Exception as e:
+        print(f"❌ v7 處理錯誤: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 if __name__ == '__main__':
-    print(f"🚀 使用設備: {device}")
-    print("🌟 啟動 CycleGAN V6.0 多模型去霧服務")
-    print("📱 訪問: http://localhost:5000")
-    
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    print("🌐 載入 CycleGAN v7.0 Enhanced 去霧系統...")
+    success, message = load_v7_model()
+    if success:
+        print(f"🚀 啟動 v7 Enhanced 去霧服務 - {message}")
+        app.run(host='0.0.0.0', port=5007, debug=True)
+    else:
+        print(f"❌ v7 模型載入失敗，無法啟動服務: {message}")
